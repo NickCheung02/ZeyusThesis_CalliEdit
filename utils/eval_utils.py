@@ -82,6 +82,8 @@ def log_validation_with_pipeline(logger, pipeline, dataloader, args, accelerator
             images.append(result)
             for text in batch['texts']:
                 content = text['content'][0].replace(" ", "") #去除空格
+                if not content:
+                    continue
                 text_pos = text['pos']
                 text_pos = [p.item() for p in text_pos]
                 text_coords = pos2coords(text_pos)
@@ -98,6 +100,10 @@ def log_validation_with_pipeline(logger, pipeline, dataloader, args, accelerator
             cv2.imwrite(os.path.join(save_path, 'gt', f'{filename}.jpg'), gt_im) # rgb -> bgr
             poster_im = batch['model_out'][..., ::-1]
             cv2.imwrite(os.path.join(save_path, 'gen', f'{filename}.jpg'), poster_im) # rgb -> bgr
+
+    if not ocr_images:
+        logger.info({'global_step': step, 'validation_images': len(images), 'ocr': 'no inscription targets'})
+        return
 
     # ocr eval
     ocr_args = edict()

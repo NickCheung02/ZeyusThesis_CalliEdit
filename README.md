@@ -8,14 +8,15 @@
 
 | 功能 | 状态 |
 | --- | --- |
-| 无显卡、离线 CPU 冒烟测试 | 已通过，11 项测试 |
+| 无显卡、离线 CPU 冒烟测试 | 已通过，13 项测试 |
 | 完整画布生成链路 | 已实现，小型模型验证通过 |
 | 旧 PosterMaker 权重兼容 | 已实现，模拟旧权重验证通过 |
 | 题字内容与位置控制 | 支持最多 7 个框，每框最多 16 字 |
 | 竖排题字 | 可采用一字一框的方式表达 |
 | 无题字生成 | 推理支持 `texts=[]` |
 | 命令行推理、Gradio 界面 | 已提供；真实权重出图及界面运行尚未验证 |
-| 山水画本地数据接入、正式训练 | 待完成；数据路径仍沿用原版配置 |
+| 山水画本地数据接入 | 已完成；题字数据用于 Stage 1，纯图像用于 Stage 2 |
+| 正式 GPU 训练 | 尚未验证 |
 
 冒烟测试验证代码能执行，不代表已获得可用的山水画或书法生成质量。
 
@@ -42,7 +43,7 @@ assets/char2feat_ppocr_neck64_avg.pth
 ```text
 CPU smoke test | PyTorch 2.3.0 | offline | float32
 ...
-Ran 11 tests in ...s
+Ran 13 tests in ...s
 
 OK
 ```
@@ -96,6 +97,7 @@ OK
 ├── inference.py                   # 命令行推理与共享模型加载入口
 ├── inference.sh                   # 推理示例
 ├── smoke_test.py                  # 离线 CPU 冒烟测试入口
+├── inspect_dataset.py             # 本地数据索引、字框与图像检查
 ├── train_sd3_stage1.py            # 第一阶段：训练文字分支与 Adapter
 ├── train_sd3_stage2.py            # 第二阶段：训练场景分支
 ├── train.sh                       # 两阶段训练示例
@@ -251,15 +253,42 @@ TEXT_CHECKPOINT=/path/to/stage1.pth bash train.sh 2
 
 `--resume_from_checkpoint` 恢复模型权重及脚本解析的步数信息，不恢复完整优化器状态。权重兼容入口同样适用于训练加载；该行为不等同于完整训练状态续跑。
 
-**正式训练前仍需完成数据接入。** 目前：
+### 本地数据接入
 
-- 训练路径配置位于 `data_utils/poster_dataset_e2e_train.py`。
-- 两阶段验证路径配置位于 `data_utils/poster_dataset_e2e_eval.py`。
-- 路径仍指向原版 `cvpr25_*` 数据，尚未切换到本地山水画数据。
-- 本地 `dataset/` 数据与制作脚本未迁移，且整个目录被 Git 忽略。
-- 推理支持空题字，但训练数据过滤仍会排除无文字样本，不能据此认为纯风景训练已接通。
+`data_utils/landscape_dataset.py` 统一处理两阶段的训练与验证数据；原 Dataset 模块保留为训练脚本的兼容入口。无需手动生成新的 JSON 或复制图片。
 
-当前电脑的 CPU 冒烟测试包含一个小型反向传播检查，不代表完整训练脚本已在 CPU 或 GPU 环境完成验证。
+| 阶段 | 图像及标注来源 | 描述来源 | 训练 / 验证样本数 |
+| --- | --- | --- | --- |
+| Stage 1：写字 | `dataset1_manu_made_1` 至 `_4` 的 `images/` 和 `training_data.json` | JSON 的 `caption` | 9,088 / 480 |
+| Stage 2：画图 | `dataset2_only_landscape/images/` | 同目录 XLSX 的“文字描述”单元格中的 Description 4 | 9,020 / 480 |
+
+纯图像表格名为 `data1_9000data_nowords_COMBINED.xlsx`，使用 `image_name` 列与图片精确匹配。
+描述会先还原字面量 `\n`；有编号时提取 `Description 4:` 的内容，无编号时取四段中的第 4 段。
+无法解析的描述计入报告并排除，不回退到整段描述。未列入表格的图片不自动参与训练。
+纯图像传入全零题字特征，不再被无文字过滤规则排除。
+
+默认以文件名分组，按固定种子 42 划分约 5% 验证集，同一底图的不同字体版本不会分散到训练集与验证集。
+可通过训练参数 `--dataset_root`、`--validation_fraction`、`--dataset_split_seed` 调整。
+以上数量对应当前本地数据及默认划分，不是硬编码。
+
+全量检查发现题字数据中有 180 个零面积等无效字框；加载时剔除这些标注，仍保留有有效题字的图片。
+原图、JSON、Excel 均不改写。其余坐标与容量错误会明确报错，不用其他样本静默替换。
+图片保持比例缩放后在右侧、底部补白；字框同步变换，训练与推理共用题字编码规则。
+
+```bash
+# 查看两个阶段的数量与划分
+python inspect_dataset.py
+
+# 逐一检查图片头、文件完整性与题字坐标
+python inspect_dataset.py --check_images
+```
+
+当前全量检查：Stage 1 共 9,568 张，Stage 2 共 9,500 张，清理无效字框后图像/坐标检查错误为 0。
+数据批量读取与无文字验证分支已接通；Stage 2 不执行空题字 OCR 评分。
+`openpyxl` 是读取描述表的新增依赖，已列入 `requirements.txt`。
+本地 `dataset/` 仍被 Git 忽略，数据兼容代码及测试均放在受版本管理的目录中。
+
+当前电脑的 CPU 冒烟测试包含数据描述解析、两阶段批量读取、分组切分及小型反向传播检查，不代表完整训练脚本已在 CPU 或 GPU 环境完成验证。
 
 ## 9. 来源与许可
 

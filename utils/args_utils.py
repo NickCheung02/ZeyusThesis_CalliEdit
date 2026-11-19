@@ -1,4 +1,5 @@
 import argparse
+from pathlib import Path
 
 
 def parse_args(input_args=None):
@@ -307,6 +308,10 @@ def parse_args(input_args=None):
     parser.add_argument("--text_feature_drop", default=None, type=float)
     parser.add_argument("--deepspeed", action="store_true",)
 
+
+    parser.add_argument('--dataset_root', type=str, default=str(Path(__file__).resolve().parents[1] / 'dataset'))
+    parser.add_argument('--validation_fraction', type=float, default=0.05)
+    parser.add_argument('--dataset_split_seed', type=int, default=42)
 
     if input_args is not None:
         args = parser.parse_args(input_args)

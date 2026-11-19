@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Data paths are configured separately in data_utils; local dataset migration is pending.
+# Local data: Stage 1 inscription images; Stage 2 plain images with Description 4 captions.
 stage="${1:-1}"
 args=(
  --output_dir=/tmp --mixed_precision=fp16 --learning_rate=1e-4

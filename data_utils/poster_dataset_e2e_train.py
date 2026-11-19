@@ -14,7 +14,6 @@ from utils.utils import *
 
 
 GT_IM_SAVE_PATH = './dataset/cvpr25_training_dataset_release/images/gt/'
-SUBJECT_MASK_SAVE_PATH = './dataset/cvpr25_training_dataset_release/images/mask/'
 DATA_SAMPLES_PATH = './dataset/cvpr25_training_dataset_release/cvpr_training_data.json'
 
 class Poster_Dataset(data.Dataset):
@@ -28,18 +27,13 @@ class Poster_Dataset(data.Dataset):
 
         '''
         self.samples: List of dict
-        example: 
+        example:
             {
                 'url': 'xxxxxx.png',
                 'caption': 'xxxxxx',
                 'texts': [
                     {'content': 'xxxxxx', 'pos': [xx, xx, xx, xx]},
                     {'content': 'xxxxxx', 'pos': [xx, xx, xx, xx]},
-                    ...
-                ],
-                'logo': [
-                    [xx, xx, xx, xx],
-                    [xx, xx, xx, xx],
                     ...
                 ],
                 'texts_out': [
@@ -62,7 +56,6 @@ class Poster_Dataset(data.Dataset):
         # prompt  text
         self.prompt_fix = getattr(args, "prompt", "")
 
-        self.bg_inpaint = getattr(args, 'bg_inpaint', None)
 
         self.max_num_texts = getattr(args, 'max_num_texts', 7)
 
@@ -83,7 +76,7 @@ class Poster_Dataset(data.Dataset):
 
         self.len = len(self.samples)
         print(f"total trainning {self.len} samples")
-        
+
         self.debug = args.debug
 
     def __len__(self):
@@ -107,7 +100,7 @@ class Poster_Dataset(data.Dataset):
         except (KeyboardInterrupt, SystemExit):
             raise
         except (Exception) as e:
-            """Handling errors introduced by random mask generation step introduced in dataloader."""
+            """Fall back to another sample when loading fails."""
             print('loading error: item ' + self.samples[idx]['url'])
             sample = self.samples[idx]
             url = sample['url']
@@ -122,33 +115,26 @@ class Poster_Dataset(data.Dataset):
                     try:
                         item = self.__load_item(cur_idx)
                         self.backup_item = item
-                    except (Exception) as e: 
+                    except (Exception) as e:
                         print(f'loading error: item {cur_idx}: {self.samples[cur_idx]}')
                     if item:
                         return item
-                        
+
         return item
 
 
     def __load_item(self, idx):
         samples = self.samples[idx]
         url = samples['url'] # img relative path
-        texts = copy.deepcopy(samples['texts']) 
+        texts = copy.deepcopy(samples['texts'])
         num_texts = len(texts)
-
-        # Stage2: If a logo and small text can be annotated for the second stage training, it can improve the generation effect
-        logos = samples['logo'] if 'logo' in samples else None
-        texts_out = copy.deepcopy(samples['texts_out']) if 'texts_out' in samples else None
 
         optional_rel = {}
 
         # limit texts nums
         if num_texts > self.max_num_texts:
             # text controlnet's input needs to cache latent, so directly select top K texts
-            texts, excess_texts = texts[:self.max_num_texts], texts[self.max_num_texts:]
-            # filter out excess texts
-            texts_out = texts_out + excess_texts if texts_out else excess_texts
-
+            texts = texts[:self.max_num_texts]
             num_texts = self.max_num_texts
 
         # sort texts by pos(x1,y1, x2, y2)
@@ -163,83 +149,26 @@ class Poster_Dataset(data.Dataset):
         for i in range(num_texts):
             texts[i]['pos'] = clamp_bbox_to_image(texts[i]['pos'], poster_w, poster_h)
 
-        # check logo pos
-        if logos:
-            for i in range(len(logos)):
-                logos[i] = clamp_bbox_to_image(logos[i], poster_w, poster_h)
-
-        # check text_out pos
-        if texts_out:
-            for i in range(len(texts_out)):
-                texts_out[i]['pos'] = clamp_bbox_to_image(texts_out[i]['pos'], poster_w, poster_h)
-
         # pre-process each image' size to adapt the model's input
         poster_h, poster_w, _ = poster_im.shape
         new_h, new_w, reszie_scale = cal_resize_and_padding((poster_h, poster_w), self.input_size)
         poster_im = cv2.resize(poster_im, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
         optional_rel['target_size'] = (new_h, new_w)
         optional_rel['original_size'] = (poster_h, poster_w)
-       
-        # pre-process each text、logo、text_out pos to adapt the model's input
+
+        # Resize inscription boxes to the model canvas
         poster_h, poster_w, _ = poster_im.shape
         for i in range(num_texts):
             texts[i]['pos'] = reisize_box_by_scale(texts[i]['pos'], reszie_scale)
 
-        if texts_out:
-            for i in range(len(texts_out)):
-                texts_out[i]['pos'] = reisize_box_by_scale(texts_out[i]['pos'], reszie_scale)
-
-        if logos:
-            for i in range(len(logos)):
-                logos[i] = reisize_box_by_scale(logos[i], reszie_scale)
-
-
-        # input img
-        bg_im = poster_im.copy()
-
-        # Stage 2: read subject mask im
-        if self.bg_inpaint:
-            poster_h, poster_w, _ = poster_im.shape
-
-            # TODO: SUBJECT_MASK_SAVE_PATH requires you to set it up yourself
-            subject_mask = read_im(url[:-4] + '.png', root=SUBJECT_MASK_SAVE_PATH)
-
-            subject_mask = cv2.cvtColor(subject_mask, cv2.COLOR_RGB2GRAY)
-            subject_mask = cv2.resize(subject_mask, (poster_w, poster_h), interpolation=cv2.INTER_NEAREST)
-
-        # Stage 1: No subject_mask required
-        else: 
-            subject_mask = None
-        
-        # mask logo in Stage 2
-        if self.bg_inpaint and logos: 
-            bg_im = mask_image_by_logos(bg_im, logos, 255)
-            subject_mask = mask_image_by_logos(subject_mask, logos, 255) if subject_mask is not None else None
-
-        # mask very small characters, etc in Stage 2
-        if self.bg_inpaint and texts_out:
-            bg_im = mask_image_by_texts(bg_im, texts_out, 255)
-            subject_mask = mask_image_by_texts(subject_mask, texts_out, 255) if subject_mask is not None else None
-
         # gt poster
-        gt_im = bg_im.copy()        
-        gt_im = copy_text_to_bg(poster_im, gt_im, texts)
+        gt_im = poster_im.copy()
 
-        # mask, text region->0, other region->1, but after transform text->-1, other->1 
-        text_mask = create_mask_by_text((poster_h, poster_w), texts)
 
-        # create empty image
-        empty_image = np.zeros_like(gt_im)
 
         # padding image
         gt_im = pad_image_to_shape(gt_im, self.input_size, pad_value=255)
-        bg_im = pad_image_to_shape(bg_im, self.input_size, pad_value=255)
-        text_mask = pad_image_to_shape(text_mask, self.input_size, pad_value=255)
-        empty_image = pad_image_to_shape(empty_image, self.input_size, pad_value=0)
 
-        if self.bg_inpaint:
-            optional_rel['subject_mask'] = pad_image_to_shape(subject_mask, self.input_size, pad_value=255)
-    
         # Stage 1 can use fix prompt
         prompt = samples['caption'] if 'caption' in samples else self.prompt_fix
 
@@ -260,7 +189,7 @@ class Poster_Dataset(data.Dataset):
                     for i in range(len(text_features)):
                         if random.random() < text_p_drop:
                             text_features[i] = torch.zeros_like(text_features[i]) # N*C
-                            
+
                 # Get char_level pos encoding
                 char_positional_encoding = get_positional_encoding(self.char_padding_to_len, self.char_pos_encoding_dim) # N*32
                 for i in range(len(text_features)):
@@ -308,11 +237,8 @@ class Poster_Dataset(data.Dataset):
             'url':url,
             'texts': texts,
             'gt_im': gt_im,
-            'bg_im': bg_im,
-            'mask':text_mask,
             "caption":prompt,
             "num_texts":num_texts,
-            'controlnet_im':empty_image
         }
 
         rel.update(optional_rel)
@@ -323,6 +249,6 @@ class Poster_Dataset(data.Dataset):
                 if isinstance(v, np.ndarray):
                     rel[k] = self.transform(v)
 
-                
-        return rel 
+
+        return rel
 

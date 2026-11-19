@@ -7,7 +7,7 @@ class FourierEmbedder():
 
         self.num_freqs = num_freqs
         self.temperature = temperature
-        self.freq_bands = temperature ** ( torch.arange(num_freqs) / num_freqs )  
+        self.freq_bands = temperature ** ( torch.arange(num_freqs) / num_freqs )
 
     @ torch.no_grad()
     def __call__(self, x, cat_dim=-1):
@@ -27,7 +27,7 @@ class TextEmbedder():
         self.char_pos_encoding_dim = 32
         self.text_pos_encoding_dim = 32
         self.input_size = (1024, 1024)
-        
+
         # positional encoding
         self.fourier_embedder = FourierEmbedder(num_freqs=self.text_pos_encoding_dim // (4*2)) # 4 is xywh, 2 is cos&sin
 
@@ -38,6 +38,12 @@ class TextEmbedder():
     # texts: [{'content': 'xxx', 'pos': [x1, y1, x2, y2]}, {'content': 'xxx', 'pos': [x1, y1, x2, y2]}, ...]
     def __call__(self, texts):
         with torch.no_grad():
+            if not texts:
+                feature_dim = self.char2feat[' '].shape[-1]
+                return torch.zeros((self.max_num_texts * self.char_padding_to_len,
+                                    feature_dim + self.char_pos_encoding_dim + self.text_pos_encoding_dim))
+            if len(texts) > self.max_num_texts or any(len(t['content']) > self.char_padding_to_len for t in texts):
+                raise ValueError('Inscription exceeds the configured text capacity')
             # Get texts feature list
             text_features, ocr_token_masks = get_char_features_by_text(texts, self.char2feat, self.char_padding_to_len)
 
@@ -67,7 +73,7 @@ class TextEmbedder():
             texts_and_sep_list.append(torch.zeros((padding_token_num, pos_dim+feature_dim)))
 
             texts_all_features = torch.cat(texts_and_sep_list, dim=0) # eg. 5*16 = 80
-            
+
             return  texts_all_features
 
 
@@ -77,7 +83,7 @@ class TextEmbedder():
             batch_texts: list of texts list
             eg. [
                 [{'content': 'xxx', 'pos': [x1,y1,x2,y2]}, ...],  # sample 1
-                [{'content': 'xxx', 'pos': [x1,y1,x2,y2]}, ...],  # sample 2 
+                [{'content': 'xxx', 'pos': [x1,y1,x2,y2]}, ...],  # sample 2
                 ...
             ]
         Returns:
@@ -86,7 +92,7 @@ class TextEmbedder():
         batch_embeds = []
         for texts in batch_texts:
             # Process single sample
-            text_embeds = self.__call__(texts)  # (max_token_num, feature_dim) 
+            text_embeds = self.__call__(texts)  # (max_token_num, feature_dim)
             batch_embeds.append(text_embeds)
 
         # Stack along batch dimension

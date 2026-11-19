@@ -7,7 +7,6 @@ import numpy as np
 import cv2
 
 import torch
-import Levenshtein
 
 # x1,y1,x2,y2 -> x1,y1,w,h
 def pos2coords(pos):
@@ -22,12 +21,12 @@ def coords2pos(coords):
 def normalize_coordinates(coordinates, original_width, original_height):
     """
     Normalize coordinates to the range [0, 1].
-    
+
     Args:
         coordinates (list): A list of coordinates in the form [x, y, w, h] or [x1, y1, x2, y2].
         original_width (int): The width of the original image.
         original_height (int): The height of the original image.
-    
+
     Returns:
         list: A list of normalized coordinates.
     """
@@ -45,31 +44,10 @@ def normalize_coordinates(coordinates, original_width, original_height):
     return normalized_coords
 
 
-def convert_to_rgb(image):
-    """
-    Convert RGBA or RGB images to RGB format
-
-    Parameters:
-    image: numpy.ndarray, Input image (in RGB or RGBA format)
-
-    Returns:
-    numpy.ndarray: Image in RGB format
-    """
-    # If the image is in RGBA format, convert it to RGB
-    if image.shape[-1] == 4:
-        # Use a white background
-        background = np.ones_like(image[..., :3]) * 255
-        alpha = image[..., 3:] / 255.0
-        image = image[..., :3] * alpha + background * (1 - alpha)
-        image = image.astype(np.uint8)
-    
-    return image[..., :3]  # Ensure the return is in RGB format
-
-
 def cal_resize_and_padding(img_size, model_input_size):
     ori_h, ori_w = img_size
     target_h, target_w = model_input_size
-    
+
     scale = min(target_h/ori_h, target_w/ori_w)
     new_h, new_w = int(scale * ori_h), int(scale * ori_w)
 
@@ -98,13 +76,13 @@ def pad_image_to_shape(image, target_shape, pad_value=0):
         (0, max(0, target_shape[0] - original_shape[0])),  # Padding in the height direction
         (0, max(0, target_shape[1] - original_shape[1])),  # Padding in the width direction
     ]
-    
+
     if len(image.shape) == 3:  # Check if the image is colored
         padding.append((0, 0))  # Do not pad the channel dimension for colored images
-    
+
     padded_image = np.pad(image, padding, mode='constant', constant_values=pad_value)
     return padded_image
-    
+
 
 def clamp_bbox_to_image(bbox, image_width, image_height):
     """
@@ -124,16 +102,6 @@ def clamp_bbox_to_image(bbox, image_width, image_height):
     y2_clamped = max(0, min(y2, image_height))
 
     return (x1_clamped, y1_clamped, x2_clamped, y2_clamped)
-
-
-def create_mask_by_text(im_size, texts):
-    h, w = im_size
-    mask = np.ones((h, w, 1),dtype=np.uint8) * 255
-    for text in texts:
-        x1, y1, x2, y2 = text['pos']
-        mask[y1:y2, x1:x2, :] = 0
-
-    return mask
 
 
 def get_char_features_by_text(texts, char2feat, char_padding_num):
@@ -174,7 +142,7 @@ def get_char_features_by_text(texts, char2feat, char_padding_num):
             char_token_mask[:N] = 1
 
             token_masks.append(char_token_mask)
-            
+
     return text_features, token_masks
 
 
@@ -190,7 +158,7 @@ def get_positional_encoding(length, channels):
 
 def save_image(image, im_path):
     if isinstance(image, Image.Image):
-        image = np.array(image) 
+        image = np.array(image)
     elif isinstance(image, np.ndarray):
         image = image.astype(np.uint8)
     else:
@@ -203,19 +171,19 @@ def save_image(image, im_path):
 def post_process(image, target_size):
     """
     对模型输出结果进行后处理
-    
+
     Args:
         image: 模型的原始输出结果，是PIL.Image格式
         target_size: 目标尺寸，包含(height, width)的元组或列表
-        
+
     Returns:
         PIL.Image: 裁剪后的图像
     """
     im_h, im_w = target_size
-    
+
     # 裁剪图像到目标尺寸
     crop_rel = image.crop((0, 0, im_w, im_h))
-    
+
     return crop_rel
 
 
@@ -244,34 +212,6 @@ def sort_texts_by_pos(texts):
         return None
 
 
-def copy_text_to_bg(poster_im, gt_im, texts):
-    for text in texts:
-        x1, y1, x2, y2 = text['pos']
-        gt_im[y1:y2, x1:x2, :] = poster_im[y1:y2, x1:x2, :].copy()
-    return gt_im
-
-def mask_image_by_texts(im, texts, mask_value=0):
-    im_mask = im.copy()
-    for text in texts:
-        x1, y1, x2, y2 = text['pos']
-        if im_mask.ndim == 2:  # 灰度图像
-            im_mask[y1:y2, x1:x2] = mask_value
-        else:  # RGB或其他有多个通道的图像
-            im_mask[y1:y2, x1:x2, ...] = mask_value
-
-    return im_mask
-
-def mask_image_by_logos(im, logos, mask_value=0):
-    im_mask = im.copy()
-    for logo in logos:
-        x1, y1, x2, y2 = logo
-        if im_mask.ndim == 2:  # 灰度图像
-            im_mask[y1:y2, x1:x2] = mask_value
-        else:  # RGB或其他有多个通道的图像
-            im_mask[y1:y2, x1:x2, ...] = mask_value
-
-    return im_mask
-
 def check_and_create_directory(directory_path):
     # 如果文件夹存在
     if not os.path.isdir(directory_path):
@@ -298,6 +238,7 @@ def full_to_half_width(s):
 
 
 def get_ld(ls1, ls2):
+    import Levenshtein
     edit_dist = Levenshtein.distance(ls1, ls2)
     return 1 - edit_dist/(max(len(ls1), len(ls2)) + 1e-5)
 
@@ -338,13 +279,13 @@ def pre_process(img_list, shape):
 def check_layout(pos: list, content: str, poslist: list, url: str) -> bool:
     if not url and  not content:
         return False
-    
+
     h = abs(pos[1]-pos[3])
     w = abs(pos[0]-pos[2])
     len_text = len(content)
     num_text = len(poslist)
-    
-    return 0 <= pos[0] and 0 <= pos[1] and w >= h and h >= 20 and len_text <= 16
+
+    return 0 <= pos[0] and 0 <= pos[1] and w > 0 and h > 0 and len_text <= 16
 
 
 def filter_samples(samples: List[Dict],
@@ -377,5 +318,5 @@ def filter_samples(samples: List[Dict],
             sample_new['texts'] = texts_keep
             sample_new['texts_out'] = texts_del if texts_del else None
             filtered_samples.append(sample_new)
-            
+
     return filtered_samples

@@ -126,12 +126,10 @@ class SD3ControlNetModel(
             256,
         ),
         conditioning_channels: int = 3,
-        additional_in_channel: int = 0
     ):
         """
         conditioning_channels: condition image pixel space channels
         conditioning_embedding_out_channels: intermediate channels
-        additional_in_channel: num of additional input chaneel, 1 for inpaint mask, 0 for other controls
         """
         super().__init__()
         default_out_channels = in_channels
@@ -185,7 +183,7 @@ class SD3ControlNetModel(
             height=sample_size,
             width=sample_size,
             patch_size=patch_size,
-            in_channels=in_channels + additional_in_channel,
+            in_channels=in_channels,
             embed_dim=self.inner_dim,
             pos_embed_type=None,
         )
@@ -341,11 +339,10 @@ class SD3ControlNetModel(
 
     @classmethod
     def from_transformer(
-        cls, transformer, num_layers=None, additional_in_channel=0, load_weights_from_transformer=True
+        cls, transformer, num_layers=None, load_weights_from_transformer=True
     ):
         config = transformer.config
         config["num_layers"] = num_layers or config.num_layers
-        config["additional_in_channel"] = additional_in_channel
         controlnet = cls(**config)
 
         if load_weights_from_transformer:

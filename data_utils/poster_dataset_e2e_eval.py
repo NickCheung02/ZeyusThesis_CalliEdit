@@ -13,44 +13,35 @@ from utils.utils import *
 
 # stage2 eval
 STAGE2_GT_IM_SAVE_PATH = './dataset/cvpr25_release_benchmark_stage2/gt/'
-STAGE2_SUBJECT_MASK_SAVE_PATH = './dataset/cvpr25_release_benchmark_stage2/mask/'
 STAGE2_DATA_SAMPLES_PATH = './dataset/cvpr25_release_benchmark_stage2/text_render_benchmark.json'
 
 # stage1 eval
 STAGE1_GT_IM_SAVE_PATH = './dataset/cvpr25_release_benchmark_stage1/gt/'
-STAGE1_SUBJECT_MASK_SAVE_PATH = './dataset/cvpr25_release_benchmark_stage1/mask/'
 STAGE1_DATA_SAMPLES_PATH = './dataset/cvpr25_release_benchmark_stage1/text_render_benchmark.json'
 
 class Poster_Dataset(data.Dataset):
     def __init__(self, args, **kwargs):
         super(Poster_Dataset, self).__init__()
-        self.bg_inpaint = getattr(args, 'bg_inpaint', None)
+        self.training_stage = getattr(args, 'training_stage', 2)
 
-        if self.bg_inpaint:
+        if self.training_stage == 2:
             self.data_samples_path = STAGE2_DATA_SAMPLES_PATH
             self.gt_im_path = STAGE2_GT_IM_SAVE_PATH
-            self.mask_im_path = STAGE2_SUBJECT_MASK_SAVE_PATH
         else:
             self.data_samples_path = STAGE1_DATA_SAMPLES_PATH
             self.gt_im_path = STAGE1_GT_IM_SAVE_PATH
-            self.mask_im_path = STAGE1_SUBJECT_MASK_SAVE_PATH
 
         with open(self.data_samples_path, 'r', encoding='utf-8') as f:
             self.samples = json.load(f)
         '''
         self.samples: List of dict
-        example: 
+        example:
             {
                 'url': 'xxxxxx.png',
                 'caption': 'xxxxxx',
                 'texts': [
                     {'content': 'xxxxxx', 'pos': [xx, xx, xx, xx]},
                     {'content': 'xxxxxx', 'pos': [xx, xx, xx, xx]},
-                    ...
-                ],
-                'logo': [
-                    [xx, xx, xx, xx],
-                    [xx, xx, xx, xx],
                     ...
                 ],
                 'texts_out': [
@@ -60,7 +51,7 @@ class Poster_Dataset(data.Dataset):
                 ],
             }
         '''
-    
+
         self.len = len(self.samples)
         print(f"total {self.len} test samples")
 
@@ -76,21 +67,20 @@ class Poster_Dataset(data.Dataset):
         # prompt  text
         self.prompt_fix = getattr(args, "prompt", "")
 
-        self.erode_mask = getattr(args, 'erode_mask', None)
 
         self.max_num_texts = getattr(args, 'max_num_texts', 7)
 
         self.char_padding_to_len = getattr(args, 'char_padding_to_len', None)
 
         self.text_feature_drop = getattr(args, "text_feature_drop", None)
-        
+
         self.char_pos_encoding_dim = getattr(args, 'char_pos_encoding_dim', 32)
 
         self.text_pos_encoding_dim = getattr(args, 'text_pos_encoding_dim', 32)
 
         self.char2feat = torch.load('./assets/char2feat_ppocr_neck64_avg.pth')
         print("dataset load ppocr64 char2feat successfully!")
-        
+
         self.fourier_embedder = FourierEmbedder(num_freqs=self.text_pos_encoding_dim // (4*2)) # 4 is xywh, 2 is cos&sin
 
         self.debug = args.debug
@@ -117,7 +107,7 @@ class Poster_Dataset(data.Dataset):
         except (KeyboardInterrupt, SystemExit):
             raise
         except (Exception) as e:
-            """Handling errors introduced by random mask generation step introduced in dataloader."""
+            """Fall back to another sample when loading fails."""
             print('loading error: item ' + self.samples[idx]['url'])
             sample = self.samples[idx]
             url = sample['url']
@@ -132,11 +122,11 @@ class Poster_Dataset(data.Dataset):
                     try:
                         item = self.__load_item(cur_idx)
                         self.backup_item = item
-                    except (Exception) as e: 
+                    except (Exception) as e:
                         print('loading error: item ' + self.samples[cur_idx]['url'])
                     if item:
                         return item
-                        
+
         return item
 
 
@@ -169,43 +159,20 @@ class Poster_Dataset(data.Dataset):
         poster_im = cv2.resize(poster_im, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
         optional_rel['target_size'] = (new_h, new_w)
         optional_rel['original_size'] = (poster_h, poster_w)
-        
+
 
         # pre-process each text' pos to adapt the model's input
         poster_h, poster_w, _ = poster_im.shape
         for i in range(num_texts):
             texts[i]['pos'] = reisize_box_by_scale(texts[i]['pos'], reszie_scale)
 
-        # get bg image
-        bg_im = poster_im.copy()
-
-        if self.bg_inpaint:
-            poster_h, poster_w, _ = poster_im.shape
-            subject_mask = read_im(url[:-4] + '.png', root=self.mask_im_path)
-            subject_mask = cv2.cvtColor(subject_mask, cv2.COLOR_RGB2GRAY)
-            subject_mask = cv2.resize(subject_mask, (poster_w, poster_h), interpolation=cv2.INTER_NEAREST)
-            if self.erode_mask:
-                subject_mask = cv2.erode(subject_mask, np.ones((3, 3), np.uint8), iterations=1)
-        else:
-            subject_mask = None
-
         # gt poster
-        gt_im = bg_im.copy()        
-        gt_im = copy_text_to_bg(poster_im, gt_im, texts)
+        gt_im = poster_im.copy()
 
-        # mask, text region->0, other region->1, but after transform text->-1, other->1 
-        text_mask = create_mask_by_text((poster_h, poster_w), texts)
-       
-        # create empty image
-        empty_image = np.zeros_like(gt_im)
+
 
         # padding image
         gt_im = pad_image_to_shape(gt_im, self.input_size, pad_value=255)
-        bg_im = pad_image_to_shape(bg_im, self.input_size, pad_value=255)
-        text_mask = pad_image_to_shape(text_mask, self.input_size, pad_value=255)
-        empty_image = pad_image_to_shape(empty_image, self.input_size, pad_value=0)
-        if self.bg_inpaint:
-            optional_rel['subject_mask'] = pad_image_to_shape(subject_mask, self.input_size, pad_value=255)
 
         prompt = samples['caption'] if 'caption' in samples else self.prompt_fix
 
@@ -255,11 +222,8 @@ class Poster_Dataset(data.Dataset):
             'url':url,
             'texts': texts,
             'gt_im': gt_im,
-            'bg_im': bg_im,
-            'mask':text_mask,
             "num_texts":num_texts,
             'caption':prompt,
-            'controlnet_im':empty_image
         }
 
         rel.update(optional_rel)
@@ -270,6 +234,6 @@ class Poster_Dataset(data.Dataset):
                 if isinstance(v, np.ndarray):
                     rel[k] = self.transform(v)
 
-                
-        return rel 
+
+        return rel
 

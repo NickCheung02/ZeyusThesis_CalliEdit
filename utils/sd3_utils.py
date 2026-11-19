@@ -3,7 +3,7 @@ import os
 import logging
 import time
 import math
-import random 
+import random
 import numpy as np
 
 from diffusers import AutoencoderKL
@@ -260,7 +260,7 @@ def prompt_embedding_drop(prompt_embed, pooled_prompt_embed, neg_prompt_embed, n
     pooled_prompt_embeds = np.concatenate((pooled_prompt_1_embed, pooled_prompt_2_embed), axis=-1) # 2048
     clip_prompt_embeds = np.concatenate((prompt_1_embed, prompt_2_embed), axis=-1) # 77*2048
     clip_prompt_embeds = np.pad(
-        clip_prompt_embeds, 
+        clip_prompt_embeds,
         ((0,0), (0, t5_prompt_embed.shape[-1] - clip_prompt_embeds.shape[-1])),
         mode='constant',
         constant_values=0
@@ -307,13 +307,7 @@ def load_transfomer(args):
     return transformer
 
 
-def load_controlnet(args, transformer, additional_in_channel=0, num_layers=12, scratch=False):
-    if args.controlnet_model_name_or_path and not scratch:
-        controlnet = SD3ControlNetModel.from_pretrained(
-            args.controlnet_model_name_or_path, additional_in_channel=additional_in_channel
-        )
-    else:
-        controlnet = SD3ControlNetModel.from_transformer(
-            transformer, num_layers=num_layers, additional_in_channel=additional_in_channel
-        )
-    return controlnet
+def load_controlnet(args, transformer, num_layers=12, scratch=False):
+    from utils.checkpoint_utils import create_controlnet
+    source = None if scratch else args.controlnet_model_name_or_path
+    return create_controlnet(transformer, source, num_layers=num_layers)

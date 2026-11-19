@@ -13,39 +13,25 @@ from modelscope.utils.constant import Tasks
 
 from models.recognizer import TextRecognizer
 from utils.utils import (
-    check_and_create_directory, 
-    pos2coords, 
-    full_to_half_width, 
-    get_ld, 
+    check_and_create_directory,
+    pos2coords,
+    full_to_half_width,
+    get_ld,
     pre_process
 )
 
 def process(batch, args, pipeline):
     with torch.no_grad():
-        prompt = batch['caption']        
-        bg_im = batch['bg_im'].float().cuda() # [-1,1], BCHW
-        controlnet_im = batch['controlnet_im'].float().cuda()
+        prompt = batch['caption']
+        generator = torch.Generator(device='cuda').manual_seed(args.seed) if args.seed is not None else None
 
-        # random seed
-        generator = torch.Generator(device='cuda').manual_seed(args.seed) if not args.seed is None else None
-
-        if args.bg_inpaint:
-            control_mask = batch['subject_mask'].float().cuda() # [-1,1], BCHW
-        else:
-            control_mask = batch['mask'].float().cuda() # [-1,1], BCHW
-
-        control_mask = ((control_mask + 1.0) / 2.0) # [-1,1]->[0,1], 0 means need inpaint
-        cond_image_inpaint = (bg_im + 1) * control_mask - 1 
-        
         text_embeds = batch['text_embeds'].float().cuda()
-    
+
         image = pipeline(
             prompt=prompt,
             negative_prompt='deformed, distorted, disfigured, poorly drawn, bad anatomy, wrong anatomy, extra limb, missing limb, floating limbs, mutated hands and fingers, disconnected limbs, mutation, mutated, ugly, disgusting, blurry, amputation, NSFW',
             height=args.resolution_h,
             width=args.resolution_w,
-            control_image=[cond_image_inpaint, controlnet_im],  # B, C, H, W
-            control_mask=control_mask,  # B,1,H,W
             text_embeds=text_embeds, # B, L, C
             num_inference_steps=args.num_inference_steps,
             generator=generator,
@@ -67,11 +53,11 @@ def post_process(batch, result):
 
     batch['gt_im'] = gt_im
     batch['model_out'] = gen_im
-        
+
 
 def log_validation_with_pipeline(logger, pipeline, dataloader, args, accelerator, step):
     logger.info("Running validation... ")
-    
+
     pipeline = pipeline.to(accelerator.device)
     pipeline.set_progress_bar_config(disable=True)
 
@@ -84,7 +70,7 @@ def log_validation_with_pipeline(logger, pipeline, dataloader, args, accelerator
     check_and_create_directory(os.path.join(save_path, 'gt'))
     check_and_create_directory(os.path.join(save_path, 'gen'))
 
-    # test 
+    # test
     images = []
     ocr_images = []
     with torch.no_grad():
@@ -101,7 +87,7 @@ def log_validation_with_pipeline(logger, pipeline, dataloader, args, accelerator
                 text_coords = pos2coords(text_pos)
                 ocr_images.append({
                     'url':batch['url'][0],
-                    'content': content, 
+                    'content': content,
                     'gen_poster_im': batch['model_out'],
                     'text_coords' :text_coords,
                 })
@@ -118,7 +104,7 @@ def log_validation_with_pipeline(logger, pipeline, dataloader, args, accelerator
     ocr_args.rec_image_shape = "3, 48, 320"
     ocr_args.rec_char_dict_path = os.path.join('./ocr_recog', 'ppocr_keys_v1.txt')
     ocr_args.rec_batch_num = 1
-    ocr_args.use_fp16 = False 
+    ocr_args.use_fp16 = False
 
     predictor = modelscope_pipline(Tasks.ocr_recognition, model='damo/cv_convnextTiny_ocr-recognition-general_damo')
     text_recognizer = TextRecognizer(ocr_args, None)
@@ -150,10 +136,10 @@ def log_validation_with_pipeline(logger, pipeline, dataloader, args, accelerator
             pred_text = pred_text.replace(" ", "")
 
             preds_all += [pred_text]
-            
+
             gt_order = [text_recognizer.char2id.get(m, len(text_recognizer.chars)-1) for m in gt_text]
             pred_order = [text_recognizer.char2id.get(m, len(text_recognizer.chars)-1) for m in pred_text]
-        
+
             if pred_text == gt_text:
                 sen_acc += [1]
             else:
@@ -177,9 +163,9 @@ def get_validation_dataset_and_dataloader_e2e(args):
     from data_utils.poster_dataset_e2e_eval import Poster_Dataset
     test_args = copy.deepcopy(args)
     dataset = Poster_Dataset(args=test_args)
-    dataloader = DataLoader(dataset, 
-                            num_workers=0, 
-                            batch_size=1, 
+    dataloader = DataLoader(dataset,
+                            num_workers=0,
+                            batch_size=1,
                             shuffle=False)
-    
+
     return dataloader, dataset, test_args

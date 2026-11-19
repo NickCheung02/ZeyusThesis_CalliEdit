@@ -6,7 +6,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--pretrained_model_name_or_path",
         type=str,
-        default='runwayml/stable-diffusion-inpainting',
+        default='./checkpoints/stable-diffusion-3-medium-diffusers',
         help="Path to pretrained model or model identifier from huggingface.co/models.",
     )
 
@@ -281,7 +281,6 @@ def parse_args(input_args=None):
     parser.add_argument('--max_num_texts', type=int, default=7)
 
     # use Stage2 training
-    parser.add_argument('--bg_inpaint', action='store_true')
 
     # For SD3
     parser.add_argument(
@@ -306,12 +305,7 @@ def parse_args(input_args=None):
     parser.add_argument("--logit_std", type=float, default=1.0)
     parser.add_argument("--mode_scale", type=float, default=1.29)
     parser.add_argument("--text_feature_drop", default=None, type=float)
-    parser.add_argument("--erode_mask", action='store_true')
     parser.add_argument("--deepspeed", action="store_true",)
-    parser.add_argument("--reward_loss_weight", type=float, default=0.001)
-    parser.add_argument("--sam_dir", type=str, default=None)
-    parser.add_argument("--sam_head_dir", type=str, default=None)
-    parser.add_argument("--sam_net_type", type=str, default="vit_h")
 
 
     if input_args is not None:

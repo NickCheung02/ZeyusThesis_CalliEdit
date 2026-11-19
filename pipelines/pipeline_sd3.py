@@ -15,9 +15,9 @@
 # Modified by Alibaba Group in 2025
 # This file contains modifications based on the PosterMaker paper (https://arxiv.org/abs/2504.06632)
 # Modifications copyright (C) 2025 Alibaba Group
-# 
+#
 # Modifications:
-# - Added support for dual ControlNet architecture 
+# - Added support for dual ControlNet architecture
 # - Implemented text features as the condition to control the text rendering
 # - Added adapter for text feature mapping
 # - Updated control block sample processing for multiple conditions
@@ -33,7 +33,7 @@ from transformers import (
     T5TokenizerFast,
 )
 
-from diffusers.image_processor import PipelineImageInput, VaeImageProcessor
+from diffusers.image_processor import VaeImageProcessor
 from diffusers.loaders import FromSingleFileMixin, SD3LoraLoaderMixin
 from diffusers.models.autoencoders import AutoencoderKL
 from diffusers.models.transformers import SD3Transformer2DModel
@@ -48,7 +48,6 @@ from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.pipelines.stable_diffusion_3.pipeline_output import (
     StableDiffusion3PipelineOutput,
 )
-from torchvision.transforms.functional import resize, InterpolationMode
 
 import sys
 import os
@@ -189,7 +188,7 @@ class StableDiffusion3ControlNetPipeline(
         transformer: SD3Transformer2DModel,
         scheduler: FlowMatchEulerDiscreteScheduler,
         vae: AutoencoderKL,
-        controlnet_inpaint: SD3ControlNetModel,
+        controlnet_scene: SD3ControlNetModel,
         controlnet_text: SD3ControlNetModel,
         text_encoder: Optional[CLIPTextModelWithProjection] = None,
         tokenizer: Optional[CLIPTokenizer] = None,
@@ -213,7 +212,7 @@ class StableDiffusion3ControlNetPipeline(
                 tokenizer_3=tokenizer_3,
                 transformer=transformer,
                 scheduler=scheduler,
-                controlnet_inpaint=controlnet_inpaint,
+                controlnet_scene=controlnet_scene,
                 controlnet_text=controlnet_text,
                 adapter=adapter,
             )
@@ -222,7 +221,7 @@ class StableDiffusion3ControlNetPipeline(
                 vae=vae,
                 transformer=transformer,
                 scheduler=scheduler,
-                controlnet_inpaint=controlnet_inpaint,
+                controlnet_scene=controlnet_scene,
                 controlnet_text=controlnet_text,
                 adapter=adapter,
             )
@@ -232,11 +231,6 @@ class StableDiffusion3ControlNetPipeline(
             else 8
         )
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
-        self.control_image_processor = VaeImageProcessor(
-            vae_scale_factor=self.vae_scale_factor,
-            do_convert_rgb=True,
-            do_normalize=False,
-        )
         self.tokenizer_max_length = (
             self.tokenizer.model_max_length
             if hasattr(self, "tokenizer") and self.tokenizer is not None
@@ -247,7 +241,7 @@ class StableDiffusion3ControlNetPipeline(
             if hasattr(self, "transformer") and self.transformer is not None
             else 128
         )
-    
+
 
     # Copied from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3.StableDiffusion3Pipeline._get_t5_prompt_embeds
     def _get_t5_prompt_embeds(
@@ -713,134 +707,6 @@ class StableDiffusion3ControlNetPipeline(
         return latents
 
     # Copied from diffusers.pipelines.controlnet.pipeline_controlnet.StableDiffusionControlNetPipeline.prepare_image
-    def prepare_image(
-        self,
-        image,
-        width,
-        height,
-        batch_size,
-        num_images_per_prompt,
-        device,
-        dtype,
-        do_classifier_free_guidance=False,
-        guess_mode=False,
-    ):
-        image = self.control_image_processor.preprocess(
-            image, height=height, width=width
-        ).to(dtype=torch.float32)
-        image_batch_size = image.shape[0]
-
-        if image_batch_size == 1:
-            repeat_by = batch_size
-        else:
-            # image batch size is the same as prompt batch size
-            repeat_by = num_images_per_prompt
-
-        image = image.repeat_interleave(repeat_by, dim=0)
-
-        image = image.to(device=device, dtype=dtype)
-
-        if do_classifier_free_guidance and not guess_mode:
-            image = torch.cat([image] * 2)
-
-        return image
-
-    def prepare_image_with_mask(
-        self,
-        image,
-        mask,
-        width,
-        height,
-        batch_size,
-        num_images_per_prompt,
-        device,
-        dtype,
-        do_classifier_free_guidance=False,
-        guess_mode=False,
-    ):
-
-        if isinstance(image, torch.Tensor):
-            pass
-        else:
-            image = self.image_processor.preprocess(
-                image, height=height, width=width
-            )  # C,H,W
-
-        if isinstance(mask, torch.Tensor):
-            pass
-        else:
-            raise "Control Mask must be tensor"
-
-        image_batch_size = image.shape[0]
-
-        if image_batch_size == 1:
-            repeat_by = batch_size
-        else:
-            # image batch size is the same as prompt batch size
-            repeat_by = num_images_per_prompt
-
-        image = image.repeat_interleave(repeat_by, dim=0)
-        mask = mask.repeat_interleave(repeat_by, dim=0)
-
-        image = image.to(device=device, dtype=self.vae.dtype)
-        mask = mask.to(device=device, dtype=dtype)
-
-        image_latents = self.vae.encode(image).latent_dist.sample()
-        image_latents = (image_latents - self.vae.config.shift_factor) * self.vae.config.scaling_factor
-        image_latents = image_latents.to(dtype)
-
-        # cat image and mask
-        mask = torch.nn.functional.interpolate(
-            mask, size=(height // self.vae_scale_factor, width // self.vae_scale_factor), mode='nearest'
-        )
-        
-        control_image = torch.cat([image_latents, mask], dim=1)
-
-        if do_classifier_free_guidance and not guess_mode:
-            control_image = torch.cat([control_image] * 2)
-        return control_image
-
-    def prepare_image_vae_cond(
-        self,
-        image,
-        width,
-        height,
-        batch_size,
-        num_images_per_prompt,
-        device,
-        dtype,
-        do_classifier_free_guidance=False,
-        guess_mode=False,
-    ):
-
-        if isinstance(image, torch.Tensor):
-            pass
-        else:
-            image = self.image_processor.preprocess(
-                image, height=height, width=width
-            )  # C,H,W
-
-        image_batch_size = image.shape[0]
-
-        if image_batch_size == 1:
-            repeat_by = batch_size
-        else:
-            # image batch size is the same as prompt batch size
-            repeat_by = num_images_per_prompt
-
-        image = image.repeat_interleave(repeat_by, dim=0)
-        image = image.to(device=device, dtype=self.vae.dtype)
-
-        image_latents = self.vae.encode(image).latent_dist.sample()
-        image_latents = (image_latents - self.vae.config.shift_factor) * self.vae.config.scaling_factor
-        image_latents = image_latents.to(dtype)
-        
-        control_image = image_latents
-
-        if do_classifier_free_guidance and not guess_mode:
-            control_image = torch.cat([control_image] * 2)
-        return control_image
-
     @property
     def guidance_scale(self):
         return self._guidance_scale
@@ -877,7 +743,7 @@ class StableDiffusion3ControlNetPipeline(
         dtype,
         num_images_per_prompt,
         do_classifier_free_guidance=False,
-    ):  
+    ):
         texts_embeds = texts_embeds.to(device=device, dtype=dtype) # B*N*128
         batch_size = texts_embeds.shape[0]
 
@@ -911,11 +777,6 @@ class StableDiffusion3ControlNetPipeline(
         guidance_scale: float = 7.0,
         control_guidance_start: Union[float, List[float]] = 0.0,
         control_guidance_end: Union[float, List[float]] = 1.0,
-        control_image: Union[
-            PipelineImageInput,
-            List[PipelineImageInput],
-        ] = None,
-        control_mask=None,
         controlnet_conditioning_scale: Union[float, List[float]] = 1.0,
         controlnet_pooled_projections: Optional[torch.FloatTensor] = None,
         negative_prompt: Optional[Union[str, List[str]]] = None,
@@ -970,14 +831,6 @@ class StableDiffusion3ControlNetPipeline(
                 The percentage of total steps at which the ControlNet starts applying.
             control_guidance_end (`float` or `List[float]`, *optional*, defaults to 1.0):
                 The percentage of total steps at which the ControlNet stops applying.
-            control_image (`torch.Tensor`, `PIL.Image.Image`, `np.ndarray`, `List[torch.Tensor]`, `List[PIL.Image.Image]`, `List[np.ndarray]`,:
-                    `List[List[torch.Tensor]]`, `List[List[np.ndarray]]` or `List[List[PIL.Image.Image]]`):
-                The ControlNet input condition to provide guidance to the `unet` for generation. If the type is
-                specified as `torch.Tensor`, it is passed to ControlNet as is. `PIL.Image.Image` can also be accepted
-                as an image. The dimensions of the output image defaults to `image`'s dimensions. If height and/or
-                width are passed, `image` is resized accordingly. If multiple ControlNets are specified in `init`,
-                images must be passed as a list such that each element of the list can be correctly batched for input
-                to a single ControlNet.
             controlnet_conditioning_scale (`float` or `List[float]`, *optional*, defaults to 1.0):
                 The outputs of the ControlNet are multiplied by `controlnet_conditioning_scale` before they are added
                 to the residual in the original `unet`. If multiple ControlNets are specified in `init`, you can set
@@ -1064,8 +917,8 @@ class StableDiffusion3ControlNetPipeline(
         ):
             mult = (
                 # TODO: check correctness
-                len(self.controlnet_inpaint.nets)
-                if isinstance(self.controlnet_inpaint, SD3MultiControlNetModel)
+                len(self.controlnet_scene.nets)
+                if isinstance(self.controlnet_scene, SD3MultiControlNetModel)
                 else 1
             )
             control_guidance_start, control_guidance_end = (
@@ -1134,56 +987,24 @@ class StableDiffusion3ControlNetPipeline(
                 [negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0
             )
 
-        assert isinstance(control_image, list) and len(control_image) == 2
-        control_image_inpaint, control_image_text = control_image
-
-        # 3.1 Prepare control image for inpaint
-        if isinstance(self.controlnet_inpaint, SD3ControlNetModel):
-            control_image_inpaint = self.prepare_image_with_mask(
-                image=control_image_inpaint,
-                mask=control_mask,
-                width=width,
-                height=height,
-                batch_size=batch_size * num_images_per_prompt,
-                num_images_per_prompt=num_images_per_prompt,
-                device=device,
-                dtype=self.controlnet_inpaint.dtype,
-                do_classifier_free_guidance=self.do_classifier_free_guidance,
-            )
-            height, width = control_image_inpaint.shape[-2:]
-            height = height * self.vae_scale_factor
-            width = width * self.vae_scale_factor
-        elif isinstance(self.controlnet_inpaint, SD3MultiControlNetModel):
-            raise NotImplementedError
-        else:
-            raise ValueError("ControlNet must be of type SD3ControlNetModel")
-        
-        # 3.2 Prepare control image for text
-        if isinstance(self.controlnet_text, SD3ControlNetModel):
-            control_image_text = self.prepare_image_vae_cond(
-                image=control_image_text,
-                width=width,
-                height=height,
-                batch_size=batch_size * num_images_per_prompt,
-                num_images_per_prompt=num_images_per_prompt,
-                device=device,
-                dtype=self.controlnet_text.dtype,
-                do_classifier_free_guidance=self.do_classifier_free_guidance,
-            )
-            # height, width = control_image_text.shape[-2:]
-            # height = height * self.vae_scale_factor
-            # width = width * self.vae_scale_factor
-        elif isinstance(self.controlnet_text, SD3MultiControlNetModel):
-            raise NotImplementedError
-        else:
-            raise ValueError("ControlNet must be of type SD3ControlNetModel")
-
         if controlnet_pooled_projections is None:
+            # Match the zero pooled conditioning used by both training stages.
             controlnet_pooled_projections = torch.zeros_like(pooled_prompt_embeds)
-        else:
-            controlnet_pooled_projections = (
-                controlnet_pooled_projections or pooled_prompt_embeds
-            )
+
+        # Full-canvas generation: no reference image or preservation mask.
+        condition_batch = batch_size * num_images_per_prompt
+        if self.do_classifier_free_guidance:
+            condition_batch *= 2
+        condition_shape = (
+            condition_batch, self.transformer.config.in_channels,
+            height // self.vae_scale_factor, width // self.vae_scale_factor,
+        )
+        control_image_scene = torch.zeros(
+            condition_shape, device=device, dtype=self.controlnet_scene.dtype
+        )
+        control_image_text = torch.zeros(
+            condition_shape, device=device, dtype=self.controlnet_text.dtype
+        )
 
         # 4. Prepare timesteps
         timesteps, num_inference_steps = retrieve_timesteps(
@@ -1215,13 +1036,13 @@ class StableDiffusion3ControlNetPipeline(
                 for s, e in zip(control_guidance_start, control_guidance_end)
             ]
             controlnet_keep.append(
-                keeps[0] if isinstance(self.controlnet_inpaint, SD3ControlNetModel) else keeps
+                keeps[0] if isinstance(self.controlnet_scene, SD3ControlNetModel) else keeps
             )
 
         # Prepare text embedds
         texts_embeds = text_embeds
         texts_embeds = self.prepare_text_embeds(
-            texts_embeds,   
+            texts_embeds,
             device=device,
             dtype=self.controlnet_text.dtype,
             do_classifier_free_guidance=self.do_classifier_free_guidance,
@@ -1258,13 +1079,13 @@ class StableDiffusion3ControlNetPipeline(
                     cond_scale = controlnet_cond_scale * controlnet_keep[i]
 
                 # controlnet(s) inference
-                control_block_samples_inpaint = self.controlnet_inpaint(
+                control_block_samples_scene = self.controlnet_scene(
                     hidden_states=latent_model_input,
                     timestep=timestep,
                     encoder_hidden_states=prompt_embeds,
                     pooled_projections=controlnet_pooled_projections,
                     joint_attention_kwargs=self.joint_attention_kwargs,
-                    controlnet_cond=control_image_inpaint,
+                    controlnet_cond=control_image_scene,
                     conditioning_scale=cond_scale,
                     return_dict=False,
                 )[0]
@@ -1280,10 +1101,10 @@ class StableDiffusion3ControlNetPipeline(
                     return_dict=False,
                 )[0]
 
-                block_interval = (len(control_block_samples_inpaint) + 1) // len(control_block_samples_text)
+                block_interval = (len(control_block_samples_scene) + 1) // len(control_block_samples_text)
                 control_block_samples = []
-                for block_i in range(len(control_block_samples_inpaint)):
-                    control_block_sample = control_block_samples_inpaint[block_i] + control_block_samples_text[block_i // block_interval]
+                for block_i in range(len(control_block_samples_scene)):
+                    control_block_sample = control_block_samples_scene[block_i] + control_block_samples_text[block_i // block_interval]
                     control_block_samples.append(control_block_sample)
 
                 noise_pred = self.transformer(

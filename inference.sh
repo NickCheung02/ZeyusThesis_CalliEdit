@@ -1,25 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
 python inference.py \
- --pretrained_model_name_or_path='./checkpoints/stable-diffusion-3-medium-diffusers/' \
- --controlnet_model_name_or_path='./checkpoints/ours_weights/scenegen_net-0415.pth' \
- --controlnet_model_name_or_path2='./checkpoints/ours_weights/textrender_net-0415.pth' \
- --seed=42 \
- --num_images_per_prompt=4 \
- --use_float16
-
-
-python inference.py \
- --pretrained_model_name_or_path='./checkpoints/stable-diffusion-3-medium-diffusers/' \
- --controlnet_model_name_or_path='./checkpoints/ours_weights/scenegen_net-rl-0415.pth' \
- --controlnet_model_name_or_path2='./checkpoints/ours_weights/textrender_net-0415.pth' \
- --seed=42 \
- --num_images_per_prompt=4 \
- --use_float16
-
-
-python inference.py \
- --pretrained_model_name_or_path='./checkpoints/stable-diffusion-3-medium-diffusers/' \
- --controlnet_model_name_or_path='./checkpoints/ours_weights/scenegen_net-1m-0415.pth' \
- --controlnet_model_name_or_path2='./checkpoints/ours_weights/textrender_net-1m-0415.pth' \
- --seed=42 \
- --num_images_per_prompt=4 \
- --use_float16
+ --pretrained_model_name_or_path='./checkpoints/stable-diffusion-3-medium-diffusers' \
+ --controlnet_model_name_or_path='./checkpoints/our_weights/scenegen_net.pth' \
+ --controlnet_model_name_or_path2='./checkpoints/our_weights/textrender_net.pth' \
+ --prompt='Chinese ink landscape painting, misty mountains, a river, rice paper texture' \
+ --texts='[{"content":"山","pos":[850,120,930,220]},{"content":"静","pos":[850,240,930,340]}]' \
+ --seed=42 --num_images_per_prompt=1 --use_float16

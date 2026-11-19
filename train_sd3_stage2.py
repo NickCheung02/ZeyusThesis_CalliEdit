@@ -1,3 +1,4 @@
+from utils.checkpoint_utils import create_controlnet, load_scene_checkpoint, load_text_checkpoint, read_checkpoint
 
 import logging
 import math
@@ -12,7 +13,6 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 from tqdm.auto import tqdm
-from torchvision.transforms import Resize, InterpolationMode
 
 import transformers
 import diffusers
@@ -59,18 +59,8 @@ def load_vae(args):
     )
     return vae
 
-def load_controlnet(args, transformer, additional_in_channel=0, pretrained_path=None):
-    if pretrained_path:
-        logger.info(f"Loading existing controlnet weights from : {args.controlnet_model_name_or_path}")
-        controlnet = SD3ControlNetModel.from_pretrained(
-            pretrained_path, additional_in_channel=additional_in_channel
-        )
-    else:
-        logger.info("Initializing controlnet weights from transformer")
-        controlnet = SD3ControlNetModel.from_transformer(
-            transformer, num_layers=args.ctrl_layers, additional_in_channel=additional_in_channel
-        )
-    return controlnet
+def load_controlnet(args, transformer, pretrained_path=None):
+    return create_controlnet(transformer, pretrained_path, num_layers=args.ctrl_layers)
 
 def load_text_encoders(args, class_one, class_two, class_three):
     logger.info(
@@ -94,6 +84,7 @@ def load_text_encoders(args, class_one, class_two, class_three):
     return text_encoder_one, text_encoder_two, text_encoder_three
 
 def main(args):
+    args.training_stage = 2
     args.output_dir = os.path.join(args.output_dir, args.name)
     check_and_create_directory(args.output_dir)
 
@@ -166,7 +157,7 @@ def main(args):
             sigma = sigma.unsqueeze(-1)
         return sigma
 
- 
+
     # Load tokenizers
     tokenizer_one = transformers.CLIPTokenizer.from_pretrained(
         args.pretrained_model_name_or_path,
@@ -205,10 +196,10 @@ def main(args):
     transformer = load_transfomer(args)
 
     # load controlnet
-    controlnet_inpaint = load_controlnet(args, transformer, additional_in_channel=1, pretrained_path=args.controlnet_model_name_or_path)
+    controlnet_scene = load_controlnet(args, transformer, pretrained_path=args.resume_from_checkpoint or args.controlnet_model_name_or_path)
 
     # Initialize text controlnet, NOTE: pretrained_path = None
-    controlnet_text = load_controlnet(args, transformer, additional_in_channel=0, pretrained_path=None)
+    controlnet_text = create_controlnet(transformer, args.controlnet_model_name_or_path2, num_layers=args.ctrl_layers, text=True)
 
     # Load ocr related
     adapter = LinearAdapterWithLayerNorm(128, 4096)
@@ -217,10 +208,10 @@ def main(args):
     wrapper_model = WrapperModel_SD3_ControlNet_with_Adapter(controlnet_text, adapter)
 
     # load Stage1 checkpoint
-    wrapper_model.load_state_dict(torch.load(args.controlnet_model_name_or_path2))
+    load_text_checkpoint(wrapper_model, args.controlnet_model_name_or_path2)
     controlnet_text = wrapper_model.controlnet
-    adapter = wrapper_model.adapter 
-    
+    adapter = wrapper_model.adapter
+
     # Taken from [Sayak Paul's Diffusers PR #6511](https://github.com/huggingface/diffusers/pull/6511/files)
     def unwrap_model(model):
         model = accelerator.unwrap_model(model)
@@ -236,10 +227,10 @@ def main(args):
 
     adapter.requires_grad_(False)
     controlnet_text.requires_grad_(False) # for frozen text_controlnet
-    wrapper_model.requires_grad_(False) 
+    wrapper_model.requires_grad_(False)
 
-    controlnet_inpaint.requires_grad_(True) # for bg inpaint learning
-    controlnet_inpaint.train() # for bg inpaint learning
+    controlnet_scene.requires_grad_(True) # for scene generation
+    controlnet_scene.train() # for scene generation
 
 
     # Check that all trainable models are in full precision
@@ -248,9 +239,9 @@ def main(args):
         " doing mixed precision training, copy of the weights should still be float32."
     )
 
-    if unwrap_model(controlnet_inpaint).dtype != torch.float32:
+    if unwrap_model(controlnet_scene).dtype != torch.float32:
         raise ValueError(
-            f"Controlnet loaded as datatype {unwrap_model(controlnet_inpaint).dtype}. {low_precision_error_string}"
+            f"Controlnet loaded as datatype {unwrap_model(controlnet_scene).dtype}. {low_precision_error_string}"
         )
 
     # Enable TF32 for faster training on Ampere GPUs,
@@ -265,10 +256,10 @@ def main(args):
 
     # Potentially load in the weights and states from a previous save
     if args.resume_from_checkpoint:
-        state_dict = torch.load(args.resume_from_checkpoint, map_location='cpu')
+        state_dict = read_checkpoint(args.resume_from_checkpoint)
 
         try:
-            controlnet_inpaint.load_state_dict(state_dict)
+            load_scene_checkpoint(controlnet_scene, state_dict)
             print(f"Resuming from checkpoint {args.resume_from_checkpoint}")
         except Exception as e:
             print("model weights don't match the model")
@@ -286,7 +277,7 @@ def main(args):
 
 
     # Optimizer creation
-    params_to_optimize = controlnet_inpaint.parameters()
+    params_to_optimize = controlnet_scene.parameters()
     optimizer_class = torch.optim.AdamW
     optimizer = optimizer_class(
         params_to_optimize,
@@ -335,10 +326,10 @@ def main(args):
     )
 
     # Prepare everything with our `accelerator`.
-    controlnet_inpaint, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        controlnet_inpaint, optimizer, train_dataloader, lr_scheduler
+    controlnet_scene, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        controlnet_scene, optimizer, train_dataloader, lr_scheduler
     )
-        
+
     # For mixed precision training we cast the text_encoder and vae weights to half-precision
     # as these models are only used for inference, keeping weights in full precision is not required.
     weight_dtype = torch.float32
@@ -354,17 +345,17 @@ def main(args):
     text_encoder_two.to(accelerator.device, dtype=weight_dtype)
     text_encoder_three.to(accelerator.device, dtype=weight_dtype)
     wrapper_model.to(accelerator.device, dtype=weight_dtype)
-    
+
     # Gradient checkpoint
     if args.gradient_checkpointing:
         transformer.enable_gradient_checkpointing()
-        controlnet_inpaint.enable_gradient_checkpointing()
+        controlnet_scene.enable_gradient_checkpointing()
         controlnet_text.enable_gradient_checkpointing()
 
     # test pipeline, dataset, dataloader, args
     if accelerator.is_main_process:
         from pipelines.pipeline_sd3 import StableDiffusion3ControlNetPipeline
- 
+
         pipeline = StableDiffusion3ControlNetPipeline(
             scheduler=FlowMatchEulerDiscreteScheduler.from_config(
                                 noise_scheduler.config
@@ -377,7 +368,7 @@ def main(args):
             tokenizer_2=tokenizer_two,
             text_encoder_3=text_encoder_three,
             tokenizer_3=tokenizer_three,
-            controlnet_inpaint=unwrap_model(controlnet_inpaint),
+            controlnet_scene=unwrap_model(controlnet_scene),
             controlnet_text=controlnet_text,
             adapter=adapter,
         )
@@ -422,45 +413,27 @@ def main(args):
         disable=not accelerator.is_local_main_process,
     )
 
-    resize = Resize(size=(args.resolution_h // 8, args.resolution_w // 8), interpolation = InterpolationMode.NEAREST, antialias=True)
-           
+
     accelerator.wait_for_everyone()
-    controlnet_inpaint.train()
+    controlnet_scene.train()
     for epoch in range(first_epoch, args.num_train_epochs):
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
-            with accelerator.accumulate(controlnet_inpaint):
+            with accelerator.accumulate(controlnet_scene):
                 prompt_embeds, pooled_prompt_embeds = process_caption_fn(
                     batch["caption"]
                 )
 
                 # our custom input
                 gt_im = batch['gt_im'].to(memory_format=torch.contiguous_format).to(dtype=vae.dtype, device=accelerator.device)
-                controlnet_im = batch['controlnet_im'].to(memory_format=torch.contiguous_format).to(dtype=vae.dtype, device=accelerator.device)
-                subject_mask = batch['subject_mask'].to(memory_format=torch.contiguous_format).to(dtype=vae.dtype, device=accelerator.device)
 
-                # condition image latents
                 with torch.no_grad():
-                    # inpaint condition image
-                    subject_mask = (subject_mask + 1.0) / 2.0 # [-1,1]->[0,1], 0 means need inpaint
-                    cond_image_inpaint = (gt_im + 1) * subject_mask - 1
-                    cond_latents_inpaint = vae.encode(cond_image_inpaint.to(dtype=vae.dtype)).latent_dist.sample()
-
-                    cond_latents_inpaint = (cond_latents_inpaint - vae.config.shift_factor) * vae.config.scaling_factor
-                    cond_latents_inpaint = cond_latents_inpaint.to(dtype=weight_dtype)
-                    control_image_inpaint = torch.cat(
-                        [cond_latents_inpaint, resize(subject_mask.to(dtype=weight_dtype))], dim=1
-                    )  # Bx17xHxW
-
-                    # text condition image
-                    cond_latents_text = vae.encode(controlnet_im.to(dtype=vae.dtype)).latent_dist.sample()
-                    cond_latents_text = (cond_latents_text - vae.config.shift_factor) * vae.config.scaling_factor
-                    cond_latents_text = cond_latents_text.to(dtype=weight_dtype) # Bx16xHxW
-
                     # Convert images to latent space
                     latents = vae.encode(gt_im.to(dtype=vae.dtype)).latent_dist.sample()
                     latents = (latents - vae.config.shift_factor) * vae.config.scaling_factor
                     latents = latents.to(dtype=weight_dtype)
+                    control_image_scene = torch.zeros_like(latents)
+                    cond_latents_text = torch.zeros_like(latents)
 
                 # Get the text embedding for conditioning
                 text_embeds = batch['text_embeds'].to(memory_format=torch.contiguous_format, dtype=weight_dtype, device=accelerator.device)
@@ -487,7 +460,7 @@ def main(args):
                 sigmas = get_sigmas(timesteps, n_dim=latents.ndim, dtype=latents.dtype)
                 noisy_model_input = sigmas * noise + (1.0 - sigmas) * latents
 
-                # controlnet(s) inpaint inference
+                # Scene and inscription control
                 zero_pooled_prompt_embeds = True
                 if zero_pooled_prompt_embeds:
                     controlnet_pooled_projections = torch.zeros_like(
@@ -495,13 +468,13 @@ def main(args):
                     )
                 else:
                     controlnet_pooled_projections = pooled_prompt_embeds
-                
-                control_block_samples_inpaint = controlnet_inpaint(
+
+                control_block_samples_scene = controlnet_scene(
                     hidden_states=noisy_model_input,
                     timestep=timesteps,
                     encoder_hidden_states=prompt_embeds,
                     pooled_projections=controlnet_pooled_projections,
-                    controlnet_cond=control_image_inpaint,
+                    controlnet_cond=control_image_scene,
                     return_dict=False,
                 )[0]
 
@@ -515,10 +488,10 @@ def main(args):
                     text_embeds=text_embeds,
                 )
 
-                block_interval = (len(control_block_samples_inpaint) + 1) // len(wrapper_rel)
+                block_interval = (len(control_block_samples_scene) + 1) // len(wrapper_rel)
                 control_block_samples = []
-                for block_i in range(len(control_block_samples_inpaint)):
-                    control_block_sample = control_block_samples_inpaint[block_i] + wrapper_rel[block_i // block_interval]
+                for block_i in range(len(control_block_samples_scene)):
+                    control_block_sample = control_block_samples_scene[block_i] + wrapper_rel[block_i // block_interval]
                     control_block_samples.append(control_block_sample.to(dtype=weight_dtype))
 
                 model_pred = transformer(
@@ -529,7 +502,7 @@ def main(args):
                     block_controlnet_hidden_states=control_block_samples,
                     return_dict=False,
                 )[0]
-            
+
                 # Follow: Section 5 of https://arxiv.org/abs/2206.00364.
                 # Preconditioning of the model outputs.
                 model_pred = model_pred * (-sigmas) + noisy_model_input
@@ -549,7 +522,7 @@ def main(args):
                     1,
                 )
                 loss = loss.mean()
-                
+
                 # Gather the losses across all processes for logging (if we use distributed training).
                 avg_loss = accelerator.gather(loss.repeat(args.train_batch_size)).mean()
                 train_loss += avg_loss.item() / args.gradient_accumulation_steps
@@ -557,7 +530,7 @@ def main(args):
                 # Backpropagate
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
-                    params_to_clip = controlnet_inpaint.parameters()
+                    params_to_clip = controlnet_scene.parameters()
                     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
@@ -575,7 +548,7 @@ def main(args):
                     print("log error:", e)
                     traceback.print_exc()
                 train_loss = 0.0
-                
+
                 # save ckpt & eval
                 if accelerator.is_main_process:
                     try:
@@ -583,16 +556,16 @@ def main(args):
                         if global_step % args.checkpointing_steps == 0:
                             save_filename = '%s_net_%s.pth' % (global_step, args.name)
                             save_path = os.path.join(args.output_dir, save_filename)
-                            torch.save(unwrap_model(controlnet_inpaint).state_dict(), save_path)
+                            torch.save(unwrap_model(controlnet_scene).state_dict(), save_path)
 
                         # validation
                         if  global_step % args.validation_steps == 0:
-                            controlnet_inpaint.eval()
+                            controlnet_scene.eval()
                             log_validation_with_pipeline(
                                 logger=logger, pipeline=pipeline, dataloader=test_dataloader,
                                 args=test_args, accelerator=accelerator, step=global_step
                             )
-                            controlnet_inpaint.train()
+                            controlnet_scene.train()
 
                     except Exception as e:
                         print("validation error:", e)

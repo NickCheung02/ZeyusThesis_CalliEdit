@@ -1,0 +1,42 @@
+# Dataset (local training data, not tracked)
+dataset/
+
+# Model weights downloaded from HuggingFace
+checkpoints/
+
+# Generated outputs
+images/results/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Training logs
+*.log
+logs/
+wandb/
+runs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
